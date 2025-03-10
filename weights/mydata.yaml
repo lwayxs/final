@@ -1,0 +1,12 @@
+path: D:\data\data\mydata\images
+train: D:\shunyulee\data\202310309dWYtCfI\d\ds\train\images
+val: D:\shunyulee\data\202310309dWYtCfI\d\ds\val\images
+
+
+# number of classes
+nc: 4
+box : None
+
+# class names
+names: ['closed_eye','closed_mouth','open_eye','open_mouth']
+        # 0              1            2           3
