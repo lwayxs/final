@@ -1,0 +1,35 @@
+def postprocess(pred, img0, shape):
+
+        #nms后处理 删减掉重复目标
+        pred = non_max_suppression(pred, 0.25, 0.45, None, False, max_det=1000)
+        # Process predictions
+        seen = 0
+        for i, det in enumerate(pred):  # per image
+            seen += 1
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                #将坐标框按照原始物体尺寸复原
+                det[:, :4] = scale_boxes((640, 640), det[:, :4], shape).round()
+        # print(pred)
+        outputs = pred[0][:, :6]
+
+
+
+        #将坐标 类别可视化在图片上
+        if len(outputs[:, 4:] > 0):
+            for i in outputs:
+                prob = i[4]
+                cls = int(i[5])
+                if cls==0 or cls==3:
+                    img0[0:100, 300:400] = warn_img
+                all_pred_boxes = i[:4]
+                x1 = int(all_pred_boxes[0])
+                y1 = int(all_pred_boxes[1])
+                x2 = int(all_pred_boxes[2])
+                y2 = int(all_pred_boxes[3])
+                cv2.rectangle(img0, (x1, y1), (x2, y2), COLORS[cls], 1)
+                # cv2.putText(img0, CLASSES[cls] + ' ' + str(prob), (x1, y1), cv2.FONT_HERSHEY_TRIPLEX, 1,
+                #             COLORS[cls], 1, 4)
+
+
+        return img0
