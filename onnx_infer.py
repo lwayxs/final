@@ -273,7 +273,7 @@ def postprocess(pred, img0, shape):
         pitch = None
 
     # 根据头部姿态调整MAR阈值
-    default_mar_threshold = 0.5
+    default_mar_threshold = 0.6
     if pitch is not None and pitch < -10:  # 低头状态
         mar_threshold = 0.1 # 降低阈值，使张嘴检测更敏感
     else:
@@ -387,3 +387,18 @@ if __name__ == "__main__":
         img0 = infer(img)
 
         cv2.imwrite(save_path,img0)
+import time
+
+def infer(img):
+    shape = img.shape
+    img0, im = proposscess(img)
+    
+    start_time = time.time()
+    pred = onnx_inf(onnxModulePath, im)
+    end_time = time.time()
+    
+    inference_time = end_time - start_time
+    print(f"Inference time: {inference_time:.3f} seconds")
+    
+    processed_frame, found_fatigue = postprocess(pred, img0, shape)
+    return processed_frame, found_fatigue

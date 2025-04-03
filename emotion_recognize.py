@@ -14,17 +14,17 @@ def video_recognize(video_path, model):
         # YOLOv8推理
         results = model.predict(frame)
 
-        # 调用头部姿态估计
-        head_pose = estimate_head_pose(frame)
+        # # 调用头部姿态估计
+        # head_pose = estimate_head_pose(frame)
         
-        if head_pose:
-            pitch, yaw, roll = head_pose
-            if abs(yaw) > 45 or abs(pitch) > 30:
-                print("头部角度偏移较大，请调整姿势！")
-            else:
-                print(f"头部姿态: pitch={pitch:.1f}, yaw={yaw:.1f}, roll={roll:.1f}")
+        # if head_pose:
+        #     pitch, yaw, roll = head_pose
+        #     if abs(yaw) > 45 or abs(pitch) > 30:
+        #         print("头部角度偏移较大，请调整姿势！")
+        #     else:
+        #         print(f"头部姿态: pitch={pitch:.1f}, yaw={yaw:.1f}, roll={roll:.1f}")
 
-        # 后续逻辑...
+        # # 后续逻辑...
 
 
 #屌用摄像头函数 #use-camera
@@ -131,6 +131,67 @@ def put_real_smoke(v_path, s_path):
                 break
     return s_path
 
+def process_uploaded_video(input_video_path, output_video_path):
+    cap = cv2.VideoCapture(input_video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    
+    fatigue_count = 0
+    fatigue_threshold = 3
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Head pose estimation and overlay
+        head_pose = hp.estimate_head_pose_frame(frame)
+        if head_pose is not None:
+            pitch, yaw, roll = head_pose
+            cv2.putText(frame, f"Pitch: {pitch:.1f}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.putText(frame, f"Yaw: {yaw:.1f}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.putText(frame, f"Roll: {roll:.1f}", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+        else:
+            cv2.putText(frame, "No face detected", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+            pitch, yaw, roll = 0, 0, 0
+
+        # Perform fatigue detection inference
+        processed_frame, found_fatigue = infer(frame)
+
+        # Dynamic fatigue threshold adjustment based on head pose
+        if head_pose is None:
+            dynamic_threshold = fatigue_threshold
+        else:
+            if pitch > 15:
+                dynamic_threshold = 3
+            elif pitch < -15:
+                dynamic_threshold = 2
+            elif abs(yaw) > 20:
+                dynamic_threshold = 2
+            else:
+                dynamic_threshold = fatigue_threshold
+
+        if found_fatigue:
+            fatigue_count += 1
+        else:
+            fatigue_count = max(0, fatigue_count - 1)
+
+        if fatigue_count >= dynamic_threshold:
+            cv2.putText(processed_frame, "Fatigue Detected!", (20, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+
+        # Apply smoke detection overlay
+        processed_frame = smoke_infer(processed_frame)
+
+        writer.write(processed_frame)
+
+    cap.release()
+    writer.release()
 
 def put_real_combined(v_path=0, s_path=None):
     cap = cv2.VideoCapture(v_path)

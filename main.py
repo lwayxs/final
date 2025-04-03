@@ -73,15 +73,23 @@ class RoundedVideoWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cap = cv2.VideoCapture(0)
-        # 降低采集帧率到 100ms（约 10 FPS）
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # 降低采集帧率到 50ms（约 20 FPS）
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.capture_frame)
-        self.timer.start(100)
+        self.timer.start(50)
         self._pixmap = None
         self.detection_mode = False
         self.detection_running = False
         # 用于节流指标计算的帧计数器
         self.frame_count = 0
+        # 保存上一次更新的指标数据，减少不必要的UI刷新
+        self._last_head_pose = None
+        self._last_ear = None
+        self._last_mar = None
 
     def capture_frame(self):
         ret, frame = self.cap.read()
@@ -91,15 +99,15 @@ class RoundedVideoWidget(QtWidgets.QWidget):
         self.frame_count += 1
 
         # 每 3 帧异步计算指标
-        if self.frame_count % 3 == 0:
-            metrics_task = MetricsTask(frame.copy())
+        if self.frame_count % 4 == 0:
+            metrics_task = MetricsTask(frame)
             metrics_task.signals.finished.connect(self.handle_metrics)
             QtCore.QThreadPool.globalInstance().start(metrics_task)
 
         # 如果启用检测模式且没有任务正在运行，则启动检测任务
         if self.detection_mode and not self.detection_running:
             self.detection_running = True
-            task = DetectionTask(frame.copy())
+            task = DetectionTask(frame)
             task.signals.finished.connect(self.handle_detection_result)
             QtCore.QThreadPool.globalInstance().start(task)
 
@@ -120,12 +128,19 @@ class RoundedVideoWidget(QtWidgets.QWidget):
         h_img, w_img, ch = rgb_image.shape
         bytes_per_line = ch * w_img
         qt_image = QtGui.QImage(rgb_image.data, w_img, h_img, bytes_per_line, QtGui.QImage.Format_RGB888)
-        self._pixmap = QtGui.QPixmap.fromImage(qt_image)
-        self.update()
+        if self._pixmap is None or self._pixmap.toImage().bits() != qt_image.bits():
+            self._pixmap = QtGui.QPixmap.fromImage(qt_image)
+            self.update()
 
     def handle_metrics(self, head_pose_str, ear, mar):
-        self.headPoseSignal.emit(head_pose_str)
-        self.metricsSignal.emit(ear, mar)
+        if (self._last_head_pose != head_pose_str or 
+            self._last_ear != ear or 
+            self._last_mar != mar):
+            self._last_head_pose = head_pose_str
+            self._last_ear = ear
+            self._last_mar = mar
+            self.headPoseSignal.emit(head_pose_str)
+            self.metricsSignal.emit(ear, mar)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -155,16 +170,24 @@ class AlarmOverlay(QtWidgets.QWidget):
         self.hide()
         self.bg = FlashingBackground(self)
         self.bg.setGeometry(self.rect())
+        self.hide_delay_timer = QtCore.QTimer(self)
+        self.hide_delay_timer.setSingleShot(True)
+        self.hide_delay_timer.timeout.connect(self._stop_alarm)
 
     def set_alarm_text(self, fatigue_text, smoke_text):
-        self.fatigue_text = fatigue_text
-        self.smoke_text = smoke_text
-        if self.fatigue_text or self.smoke_text:
+        if fatigue_text or smoke_text:
+            # New alarm triggered: cancel any pending hide timer and update texts immediately.
+            if self.hide_delay_timer.isActive():
+                self.hide_delay_timer.stop()
+            self.fatigue_text = fatigue_text
+            self.smoke_text = smoke_text
             self.show()
             self.bg.start_blinking()
         else:
-            self.bg.stop_blinking()
-            self.hide()
+            # No new alarm: do not update texts immediately.
+            # Keep the current texts visible until the delay timer expires.
+            if not self.hide_delay_timer.isActive():
+                self.hide_delay_timer.start(1000)  # Delay of 1 second before clearing
         self.update()
 
     def resizeEvent(self, event):
@@ -187,7 +210,12 @@ class AlarmOverlay(QtWidgets.QWidget):
         combined_text = " | ".join(texts)
         painter.drawText(self.rect().adjusted(0, 20, 0, 0), QtCore.Qt.AlignCenter, combined_text)
 
-# 闪烁红色背景
+    def _stop_alarm(self):
+        self.bg.stop_blinking()
+        # Clear the alarm texts after the delay
+        self.fatigue_text = ""
+        self.smoke_text = ""
+        self.hide()
 class FlashingBackground(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -222,7 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.current_dark_mode = is_dark_mode()
         self.setWindowTitle("Fatigue and Smoke Detection")
-        self.resize(1200, 800)
+        self.resize(800, 700)
         palette = QtWidgets.QApplication.palette()
         self.setStyleSheet(f"background-color: {palette.window().color().name()};")
 
@@ -231,6 +259,48 @@ class MainWindow(QtWidgets.QMainWindow):
         main_vlayout = QtWidgets.QVBoxLayout(central_widget)
         main_vlayout.setContentsMargins(20, 20, 20, 20)
         main_vlayout.setSpacing(20)
+        
+
+        # 菜单栏
+        menubar = self.menuBar()
+        upload_menu = menubar.addMenu("UPLOAD")
+
+        upload_image_action = QtWidgets.QAction("Upload pictures", self)
+        upload_video_action = QtWidgets.QAction("Upload video", self)
+
+# 将动作添加到菜单
+        upload_menu.addAction(upload_image_action)
+        upload_menu.addAction(upload_video_action)
+
+# 连接信号到已有的上传处理函数
+        upload_image_action.triggered.connect(self.upload_image)
+        upload_video_action.triggered.connect(self.upload_video)
+        # # 新增：文件上传功能
+        # self.upload_bar_layout = QtWidgets.QHBoxLayout()
+        # self.upload_bar_layout.setAlignment(QtCore.Qt.AlignLeft)
+        # main_vlayout.insertLayout(0, self.upload_bar_layout)
+        
+        # self.fold_button = QtWidgets.QToolButton()
+        # self.fold_button.setText("☰")
+        # self.fold_button.setCheckable(True)
+        # self.fold_button.setFixedSize(30, 30)
+        # self.fold_button.clicked.connect(self.toggle_upload_panel)
+        # self.upload_bar_layout.addWidget(self.fold_button)
+        
+        # self.upload_panel = QtWidgets.QWidget()
+        # upload_panel_layout = QtWidgets.QVBoxLayout(self.upload_panel)  # 这里改为垂直布局
+        # self.upload_panel.setVisible(False)
+
+        # self.upload_image_btn = QtWidgets.QPushButton("上传图片")
+        # self.upload_video_btn = QtWidgets.QPushButton("上传视频")
+
+        # upload_panel_layout.addWidget(self.upload_image_btn)
+        # upload_panel_layout.addWidget(self.upload_video_btn)
+
+        # self.upload_bar_layout.addWidget(self.upload_panel)
+        
+        # self.upload_image_btn.clicked.connect(self.upload_image)
+        # self.upload_video_btn.clicked.connect(self.upload_video)
 
         # 将 head pose 信息与指标放在同一行，紧挨着居中显示
         top_layout = QtWidgets.QHBoxLayout()
@@ -251,8 +321,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         main_vlayout.addWidget(self.video_widget, stretch=1)
 
-        self.alarm_overlay = AlarmOverlay(central_widget)
-        self.alarm_overlay.setGeometry(0, 0, self.width(), 150)
+        self.alarm_overlay = AlarmOverlay(self.centralWidget())
+        self.alarm_overlay.setGeometry(0, 0, self.centralWidget().width(), 150)
+        self.alarm_overlay.raise_()
 
         self.video_widget.headPoseSignal.connect(self.update_info)
         self.video_widget.fatigueAlarmSignal.connect(self.update_fatigue_alarm)
@@ -263,6 +334,8 @@ class MainWindow(QtWidgets.QMainWindow):
         main_vlayout.addLayout(btn_layout)
         self.fatigue_btn = QtWidgets.QPushButton("Start Detection")
         self.quit_btn = QtWidgets.QPushButton("❌ Quit")
+        self.fatigue_btn.setFixedWidth(400)
+        self.quit_btn.setFixedWidth(400)
         btn_layout.addWidget(self.fatigue_btn)
         btn_layout.addWidget(self.quit_btn)
 
@@ -294,6 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.fatigue_active = False
         self.smoke_active = False
+        self.fatigue_count = 0
 
     def changeEvent(self, event):
         if event.type() in (QtCore.QEvent.ApplicationPaletteChange, QtCore.QEvent.StyleChange):
@@ -303,7 +377,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.alarm_overlay.setGeometry(0, 0, self.width(), 150)
+        # Adjust the alarm overlay to always cover the video widget
+        self.alarm_overlay.setGeometry(0, 0, self.centralWidget().width(), 150)
+        self.alarm_overlay.raise_()
 
     def update_info(self, text):
         self.info_label.setText(text)
@@ -312,7 +388,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metrics_label.setText(f"EAR: {ear:.2f}   MAR: {mar:.2f}")
 
     def update_fatigue_alarm(self, flag):
-        self.fatigue_active = flag
+        if flag:
+            self.fatigue_count += 1
+        else:
+            # Optionally, decrement or reset the counter when not detected
+            self.fatigue_count = max(0, self.fatigue_count - 1)
+        # Only consider fatigue active if closed-eye is detected for 3 consecutive frames
+        if self.fatigue_count >= 3:
+            self.fatigue_active = True
+        else:
+            self.fatigue_active = False
         self.update_alarm_overlay()
 
     def update_smoke_alarm(self, flag):
@@ -328,6 +413,45 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.alarm_sound.play()
         else:
             self.alarm_sound.stop()
+
+    def toggle_upload_panel(self):
+        if self.fold_button.isChecked():
+            self.upload_panel.setVisible(True)
+        else:
+            self.upload_panel.setVisible(False)
+
+    def upload_image(self):
+        options = QtWidgets.QFileDialog.Options()
+        fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, "上传图片", "", "Image Files (*.png *.jpg *.jpeg)", options=options)
+        if fileName:
+            import cv2
+            image = cv2.imread(fileName)
+            processed_image, found_fatigue = oi.infer(image)
+            self.show_processed_image(processed_image)
+
+    def show_processed_image(self, image):
+        import cv2
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        height, width, ch = rgb_image.shape
+        bytes_per_line = ch * width
+        qimg = QtGui.QImage(rgb_image.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888)
+        pixmap = QtGui.QPixmap.fromImage(qimg)
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("检测结果 - 图片")
+        vbox = QtWidgets.QVBoxLayout(dlg)
+        label = QtWidgets.QLabel()
+        label.setPixmap(pixmap.scaled(640, 480, QtCore.Qt.KeepAspectRatio))
+        vbox.addWidget(label)
+        dlg.exec_()
+
+    def upload_video(self):
+        options = QtWidgets.QFileDialog.Options()
+        fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, "上传视频", "", "Video Files (*.mp4 *.avi *.mov)", options=options)
+        if fileName:
+            import emotion_recognize as er
+            output_path = fileName.replace(".", "_processed.")
+            er.process_uploaded_video(fileName, output_path)
+            QtWidgets.QMessageBox.information(self, "处理完成", f"处理完成的视频已保存到：{output_path}")
 
     def toggle_detection(self):
         if self.video_widget.detection_mode:
